@@ -94,9 +94,9 @@ for block in poolsoloblocks:
     totals = 0
 
     payable = round(int(value) * 0.98, 4)
-    fee = round(int(value) * 0.12, 4)
+    fee = round(int(value) * 0.02, 4)
     
-    address_totals["0x2d108a8b4da1ad960dd39836e2a8a4330695a855"] = fee
+    address_totals["FEE_ADDRESS_HERE"] = fee
     address = block['address']
     if address in address_totals:
         address_totals[address] += payable
