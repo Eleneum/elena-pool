@@ -22,8 +22,36 @@ ban = {}
 validation = {}
 accepted = 0
 rejected = 0
+solodiff = []
+pooldiff = []
 
 START_DIFF = 130000
+
+def getsolohr():
+    global solodiff
+    tlimit = int(time.time()) - 300
+    totaldiff = 0
+    nsolodiff = []
+    
+    for targetdiff, timestamp in solodiff:
+        if timestamp > tlimit:
+            totaldiff += targetdiff
+            nsolodiff.append((targetdiff, timestamp))
+    solodiff[:] = nsolodiff
+    return int(totaldiff/300)
+
+def getpoolhr():
+    global pooldiff
+    tlimit = int(time.time()) - 300
+    totaldiff = 0
+    nsolodiff = []
+    
+    for targetdiff, timestamp in pooldiff:
+        if timestamp > tlimit:
+            totaldiff += targetdiff
+            nsolodiff.append((targetdiff, timestamp))
+    pooldiff[:] = nsolodiff
+    return int(totaldiff/300)
 
 def to_byte_array(b):
     return [byte for byte in b]
@@ -50,7 +78,7 @@ def is_eth_address(cadena):
         return False
     if not cadena.startswith("0x"):
         return False
-    direccion_hex = cadena[2:]
+    direccion_hex = cadena[2:]  # Eliminar el prefijo "0x"
     return all(caracter in "0123456789abcdefABCDEF" for caracter in direccion_hex)
 
 def get_extranonce_diff(extranonce):
@@ -70,6 +98,67 @@ def get_extranonce_diff(extranonce):
     else:
         diff = START_DIFF
     return diff
+
+def mongodb_message():
+    global actualblock
+    global accepted
+    global rejected
+    
+    dbmongo = 'mongodb://127.0.0.1:27017'
+    client = MongoClient(dbmongo)
+    bcdb = client["eleneum"]
+    blocks = bcdb["blocks"]
+    
+    last_id = None
+    while True:
+        try:
+            newest_doc = blocks.find_one(sort=[("height", -1)])
+            if newest_doc['height'] != last_id:
+                print("[worker] " + str(int(time.time())) + ", New block received: " + str(newest_doc['height']))
+                url = "http://localhost:9090/getminingtemplate"
+                response = requests.get(url)
+                data = response.json()
+                blob = data['blob']
+                height = data['height']
+                diff = data['difficulty']
+                seed = data["seed"]
+                miningdiff["height"] = height
+                miningdiff["main"] = int(data['difficulty'])
+                miningdiff["blob"] = blob
+                sockets = list(open_sockets.keys()) 
+                miners = 0
+                for sock in sockets:
+                    try:
+                        jobid = random.randint(1000, 1000000)
+                        job_id = jobid
+                        extranonce_hex = open_sockets[sock]
+                        diff = get_extranonce_diff(extranonce_hex)
+                        if diff > int(data['difficulty']):
+                            diff = int(data['difficulty'])
+                        extranonce_diffs[extranonce_hex] = diff
+                        ndiff = diff
+                        diff = decimal_to_swapendian(diff)
+
+                        blob = extranonce_hex + blob[4:]
+                            
+                        newjob = {"jsonrpc":"2.0","method":"job","params":{"blob":blob,"job_id":str(jobid),"target":str(diff),"height":height,"seed_hash":seed}}
+                        response_json = json.dumps(newjob) + "\n"
+                        sock.sendall(response_json.encode('utf-8'))
+                        miners += 1
+                    except:
+                        del open_sockets[sock]
+                            
+                print("[worker] " + str(int(time.time())) + ", New job sent to: " + str(miners) + " miners")
+                print("[worker] " + str(int(time.time())) + ", Banned IP's: " + str(len(ban)))
+                print("[worker] " + str(int(time.time())) + ", On last block, Accepted shares: " + str(accepted) + ", Rejected shares: " + str(rejected))
+                print("[worker] " + str(int(time.time())) + ", Pool HR: " + str(getpoolhr()))
+                print("[worker] " + str(int(time.time())) + ", SOLO HR: " + str(getsolohr()))
+                rejected = 0
+                accepted = 0
+                last_id = newest_doc['height']
+            time.sleep(0.5)
+        except Exception as e:
+            return
 
 def send_messages(server):
 
@@ -175,12 +264,13 @@ def send_messages(server):
             print("[worker] " + str(int(time.time())) + ", New job sent to: " + str(miners) + " miners")
             print("[worker] " + str(int(time.time())) + ", Banned IP's: " + str(len(ban)))
             print("[worker] " + str(int(time.time())) + ", On last block, Accepted shares: " + str(accepted) + ", Rejected shares: " + str(rejected))
+            print("[worker] " + str(int(time.time())) + ", Pool HR: " + str(getpoolhr()))
+            print("[worker] " + str(int(time.time())) + ", SOLO HR: " + str(getsolohr()))
             rejected = 0
             accepted = 0
         return
     except Exception as e:
         print("Closing socket")
-        tsocket.close()
         return
 
 def decimal_to_swapendian(decimal_value):
@@ -203,6 +293,8 @@ def handle_connection(conn, addr):
     global extranonce_h
     global extranonce_t
     global fixed_diffs
+    global pooldiff
+    global solodiff
 
     dbmongo = 'mongodb://127.0.0.1:27017'
     client = MongoClient(dbmongo)
@@ -251,18 +343,18 @@ def handle_connection(conn, addr):
 
         if not data:
             conn.close()
-            if int(extranonce_h[extranonce_hex]) == 0:
-                if addr[0] not in ban:
-                    ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
-                else:
-                    ts = int(time.time())
-                    if int(ban[addr[0]]["timestamp"]) + 600 > ts:
-                        ban[addr[0]]["attempts"] += 1
-                    else:
-                        ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
+            #if int(extranonce_h[extranonce_hex]) == 0:
+            #    if addr[0] not in ban:
+            #        ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
+            #    else:
+            #        ts = int(time.time())
+            #        if int(ban[addr[0]]["timestamp"]) + 600 > ts:
+            #            ban[addr[0]]["attempts"] += 1
+            #        else:
+            #            ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
             return
-
         else:
+            print(data)
             response = None
             try:
                 request = json.loads(data)
@@ -294,8 +386,10 @@ def handle_connection(conn, addr):
                             json_data['address'] = address
                             if tpass != "solo":
                                 rpb = poolblocks.insert_one( json_data )
+                                solodiff.append((int(targetdiff), int(time.time())))
                                 r = pool.insert_one( { 'extranonce': extranonce_hex, 'address': address, 'target': targetdiff, 'difficulty': hash_diff, 'block': miningdiff["height"], 'nonce': mnonce, 'ts': time.time(), 'mined' : 1, 'solo' : 0  } )
                             else:
+                                pooldiff.append((int(targetdiff), int(time.time())))
                                 rpb = poolsoloblocks.insert_one( json_data )
                                 r = pool.insert_one( { 'extranonce': extranonce_hex, 'address': address, 'target': targetdiff, 'difficulty': hash_diff, 'block': miningdiff["height"], 'nonce': mnonce, 'ts': time.time(), 'mined' : 1, 'solo' : 1   } )
                         else:
@@ -303,6 +397,7 @@ def handle_connection(conn, addr):
                             response = {"jsonrpc":"2.0","id":request["id"],"result":{"status":"rejected"}}
                     elif hash_diff > targetdiff:
                         if tpass == "solo":
+                            solodiff.append((int(targetdiff), int(time.time())))
                             r = pool.insert_one( { 'extranonce': extranonce_hex, 'address': address, 'target': targetdiff, 'difficulty': hash_diff, 'block': miningdiff["height"], 'nonce': mnonce, 'ts': time.time(), 'mined' : 0, 'solo' : 1 } )
                         else:
                             if validation[vaddr] < 5:
@@ -316,6 +411,7 @@ def handle_connection(conn, addr):
                                 if hash_diff >= targetdiff:
                                     accepted += 1
                                     validation[vaddr] += 1
+                                    pooldiff.append((int(targetdiff), int(time.time())))
                                     r = pool.insert_one( { 'extranonce': extranonce_hex, 'address': address, 'target': targetdiff, 'difficulty': hash_diff, 'block': miningdiff["height"], 'nonce': mnonce, 'ts': time.time(), 'mined' : 0, 'solo' : 0  } )
                                 else:
                                     rejected += 1
@@ -328,12 +424,13 @@ def handle_connection(conn, addr):
                                         return
                             else:
                                 accepted += 1
+                                pooldiff.append((int(targetdiff), int(time.time())))
                                 r = pool.insert_one( { 'extranonce': extranonce_hex, 'address': address, 'target': targetdiff, 'difficulty': hash_diff, 'block': miningdiff["height"], 'nonce': mnonce, 'ts': time.time(), 'mined' : 0, 'solo' : 0  } )
                 elif request["method"] == 'login':
                     params = request["params"]
                     agent = params["agent"].lower()
 
-                    if "xmr" not in agent:
+                    if "xmr" not in agent and "MiningRigRentals" not in agent:
                         response = { "id": request["id"], "error": {"code" : -6,  "message": "Invalid miner" } }
                         ban[addr[0]] = { "attempts": 20, "timestamp": int(time.time()) }
                         response_json = json.dumps(response) + "\n"
@@ -401,46 +498,49 @@ def handle_connection(conn, addr):
                         conn.close()
                         return
                 else:
-                    print("no se que quieres")
-                    ban[addr[0]]["attempts"] += 1
-                    conn.close()
-                    return
+                    if 'method' not in request:
+                        ban[addr[0]]["attempts"] += 1
+                        conn.close()
+                        return
+                    response = {"jsonrpc":"2.0","id":request["id"],"result":{"status":"ok"}}
             except ValueError as e:
-                response = {"id": None, "error": {"code": -32700, "message": "Parse error"}}
-                if addr[0] not in ban:
-                    ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
-                else:
-                    ts = int(time.time())
-                    if int(ban[addr[0]]["timestamp"]) + 600 > ts:
-                        ban[addr[0]]["attempts"] += 1
-                    else:
-                        ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
-                conn.close()
-                return
+                #response = {"id": None, "error": {"code": -32700, "message": "Parse error"}}
+                #if addr[0] not in ban:
+                #    ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
+                #else:
+                #    ts = int(time.time())
+                #    if int(ban[addr[0]]["timestamp"]) + 600 > ts:
+                #        ban[addr[0]]["attempts"] += 1
+                #    else:
+                #        ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
+                #conn.close()
+                #return
+                response = {"jsonrpc":"2.0","id":request["id"],"result":{"status":"ok"}}
             except Exception as e:
-                response = {"id": None, "error": {"code": -32603, "message": "Internal error"}}
-                response_json = json.dumps(response) + "\n"
-                if addr[0] not in ban:
-                    ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
-                else:
-                    ts = int(time.time())
-                    if int(ban[addr[0]]["timestamp"]) + 600 > ts:
-                        ban[addr[0]]["attempts"] += 1
-                    else:
-                        ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
-                conn.close()
-                return
+                #response = {"id": None, "error": {"code": -32603, "message": "Internal error"}}
+                #response_json = json.dumps(response) + "\n"
+                #if addr[0] not in ban:
+                #    ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
+                #else:
+                #    ts = int(time.time())
+                #    if int(ban[addr[0]]["timestamp"]) + 600 > ts:
+                #        ban[addr[0]]["attempts"] += 1
+                #    else:
+                #        ban[addr[0]] = { "attempts": 1, "timestamp": int(time.time()) }
+                #conn.close()
+                #return
+                response = {"jsonrpc":"2.0","id":request["id"],"result":{"status":"ok"}}
             if response is not None:
                 response_json = json.dumps(response) + "\n"
                 conn.send(response_json.encode('utf-8'))
             
             if addr[0] in ban:
                 ts = int(time.time())
-                if int(ban[addr[0]]["timestamp"]) + 600 > ts and int(ban[addr[0]]["attempts"]) >= 5:
+                if int(ban[addr[0]]["timestamp"]) + 600 > ts and int(ban[addr[0]]["attempts"]) >= 30:
                     conn.close()
                     return
                 else:
-                    if int(ban[addr[0]]["timestamp"]) + 600 < ts and int(ban[addr[0]]["attempts"]) >= 5:
+                    if int(ban[addr[0]]["timestamp"]) + 600 < ts and int(ban[addr[0]]["attempts"]) >= 30:
                         del ban[addr[0]] 
 
 def mining():
@@ -457,8 +557,8 @@ def mining():
         conn, addr = s.accept()
         if addr[0] in ban:
             ts = int(time.time())
-            if int(ban[addr[0]]["attempts"]) < 5 or int(ban[addr[0]]["timestamp"]) + 600 < ts:
-                if int(ban[addr[0]]["timestamp"]) + 600 < ts and int(ban[addr[0]]["attempts"]) >= 5:
+            if int(ban[addr[0]]["attempts"]) < 30 or int(ban[addr[0]]["timestamp"]) + 600 < ts:
+                if int(ban[addr[0]]["timestamp"]) + 600 < ts and int(ban[addr[0]]["attempts"]) >= 30:
                     del ban[addr[0]]
                 at += 1
                 print("ts: " + str(at))
@@ -477,12 +577,12 @@ def poolstart():
     x = threading.Thread(target=mining, args=())
     x.start()
 
-    send_thread = threading.Thread(target=send_messages, args=("localhost",))
+    send_thread = threading.Thread(target=mongodb_message, args=())
     send_thread.start()
 
     while True:
         if not send_thread.is_alive():
-            send_thread = threading.Thread(target=send_messages, args=("localhost",))
+            send_thread = threading.Thread(target=mongodb_message, args=())
             send_thread.start()
         time.sleep(1)
 
