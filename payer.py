@@ -91,10 +91,24 @@ for address, sumvalue in address_sums.items():
         print(e)
 
 for r in pooltxs_collection.find():
-    z = txs_collection.find({'rawtx':r['rawtx']})
-    if 'hash' in z:
-        continue
-    url = 'http://pool.eleneum.org:9090/addtransaction'
-    response = requests.post(url, data=str(r['rawtx']))
-    data = response.json()
-    print(data)
+    try:
+        z = txs_collection.find_one({'rawtx':r['rawtx']})
+        if 'txinfo' in z:
+            print(z['block'])
+            continue
+        else:
+            print("si")
+    except Exception as e:
+        print("alv")
+        pass
+
+    try:
+        url = 'http://pool.eleneum.org:9090/addtransaction'
+        response = requests.post(url, data=str(r['rawtx']), timeout=5)
+        data = response.json()
+        print(data)
+    except Exception as e:
+        print("hola")
+        pass
+
+    time.sleep(1)
